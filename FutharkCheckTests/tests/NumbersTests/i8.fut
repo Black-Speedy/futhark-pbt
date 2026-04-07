@@ -57,12 +57,12 @@ let simple_fail (x: i8) : i8 =
 entry prop_simple_fail (x: i8) : bool =
     simple_fail x == x
 
-entry shrink_simple (x: i8) (tactic: i32) : (i8, i8) =
+entry shrink_simple (x: i8) (tactic: i32) : (i8, bool) =
   if tactic == 0 then
     if x > 0 then
-      (x - 1, i8.bool (x - 1 == x))
+      (x - 1, false)
     else
-      (x + 1, i8.bool (x + 1 == x)) 
+      (x + 1, false) 
   else 
-    (x, 2) 
+    (x, true) 
 

@@ -50,20 +50,20 @@ entry prop_matrix_sums_succ (input: [][]i32) : bool =
 --   0 = produced candidate (normal)
 --   1 = produced candidate but "advance tactic" hint (runner rule: if FAIL and status=1 then tactic=0 anyway, but we keep the channel)
 --   2 = stop
-entry shrink_matrix_sums (xss: [][]i32) (tactic: i32) : ([][]i32, i8) =
+entry shrink_matrix_sums (xss: [][]i32) (tactic: i32) : ([][]i32, bool) =
   let r = length xss
   in if r <= 1 then
-       (xss, 2i8)
+       (xss, true)
      else if tactic == 0 then
        -- drop last row
        let xss' = take (r-1) xss
-       in (xss', 0i8)
+       in (xss', false)
      else if tactic == 1 then
        -- drop first row
        let xss' = drop 1 xss
-       in (xss', 0i8)
+       in (xss', false)
      else
-       (xss, 2i8)
+       (xss, true)
 
 
 entry gen_matrix_sums_bad (size: i64) (seed: i32) : [][]i32 =
@@ -145,7 +145,7 @@ let update_cell_rc [r][c] (ri: i64) (ci: i64) (xss: [r][c]i32) : [r][c]i32 =
                 if i == ri && j == ci then new else xss[i][j]))
 
 
-entry shrink_matrix (xss: [][]i32) (tactic: i32) : ([][]i32, i8) =
+entry shrink_matrix (xss: [][]i32) (tactic: i32) : ([][]i32, bool) =
   let r : i64 = length xss
   let c : i64 = if r == 0 then 0 else length xss[0]
 
@@ -160,9 +160,9 @@ entry shrink_matrix (xss: [][]i32) (tactic: i32) : ([][]i32, i8) =
 
   let t : i64 = if tactic < 0i32 then 0i64 else i64.i32 tactic
 
-  let s0 : i8 = i8.i32 0
-  let s1 : i8 = i8.i32 1
-  let s2 : i8 = i8.i32 2
+  let s0 : bool = false
+  let s1 : bool = false
+  let s2 : bool = true
 
   in if t < rowCount then
        -- remove row t
@@ -200,6 +200,6 @@ entry shrink_matrix (xss: [][]i32) (tactic: i32) : ([][]i32, i8) =
        (xss, s2)
 
 
-#[prop(gen(gen_matrix_sums_bad), shrink(shrink_matrix))]
+#[prop(gen(gen_matrix_sums_bad), shrink(shrink_matrix), size(1000))]
 entry prop_matrix_sums_fail (input: [][]i32) : bool =
   nondecreasing (row_sums input)

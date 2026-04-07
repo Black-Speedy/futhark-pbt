@@ -35,12 +35,12 @@ let step (v: i32) : i32 =
   else if v < 0 then v + 1
   else 0
 
-entry shrink_simple (r: record) (tactic: i32) : (record, i8) =
+entry shrink_simple (r: record) (tactic: i32) : (record, bool) =
   if tactic == 0 then
     let x' = step r.x
-    in ({x = step r.x, y = r.y}, i8.bool (x'==r.x))  -- done=true if x can't be changed
+    in ({x = step r.x, y = r.y}, false)  -- done=true if x can't be changed
   else if tactic == 1 then
     let y' = step r.y
-    in ({x = r.x, y = step r.y}, i8.bool (y'==r.y))  -- done=true if y can't be changed
+    in ({x = r.x, y = step r.y}, false)  -- done=true if y can't be changed
   else
-    (r, 2)
+    (r, true)

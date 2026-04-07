@@ -41,7 +41,7 @@ import System.Environment
 import System.Exit
 import System.FilePath
 import System.IO
-import System.IO.Temp (withSystemTempFile)
+import System.IO.Temp (withSystemTempFile, withSystemTempDirectory)
 import System.Process.ByteString (readProcessWithExitCode)
 import Text.Regex.TDFA
 
@@ -1261,14 +1261,14 @@ shrinkLoop scratchBin srv propName vIn shrinkName = do
           statusTyE <- getOutputTypes srv shrinkName
           statusTys <- either (error . show) pure statusTyE
           let statusTy = last statusTys
-          when (statusTy /= "i8") $
+          when (statusTy /= "bool") $
             error $
               "Shrinker "
                 <> T.unpack shrinkName
-                <> " last output must be i8 status, got: "
+                <> " last output must be bool status, got: "
                 <> T.unpack statusTy
 
-          status <- (getVal srv statusVar :: IO Int8)
+          status <- (getVal srv statusVar :: IO Bool)
 
           -- Build vTry (candidate y) and make sure it is freed at the end of this step.
           withFreedVar srv vTry $ do
@@ -1280,22 +1280,38 @@ shrinkLoop scratchBin srv propName vIn shrinkName = do
             if ok
               then
                 pure $
-                  if status == 2
+                  if status
                     then StopShrinking
                     -- property passed => ignore status; do not overwrite vIn; tactic++
                     else PropPassed
               else
                 -- property failed => follow status
                 case status of
-                  0 ->
-                    freeVars srv [vIn]
-                      >> packType scratchBin srv vIn propTy [vTry]
-                      >> pure AcceptedSame
-                  1 ->
-                    freeVars srv [vIn]
-                      >> packType scratchBin srv vIn propTy [vTry]
-                      >> pure AcceptedInc
-                  -- stop; do not overwrite vIn (keep last failing)
+                  False -> do
+                    --store value to file and compare files if they are the same do increment else keep tactic the same
+                    -- store only the value from input
+                    withSystemTempDirectory "shrink-logs" $ \tmpdir -> do
+                      _ <- cmdStore srv (tmpdir ++ "/shrink_input.bin") [vIn]
+                      -- store only first field of output (the candidate shrink) for comparison
+                      _ <- cmdStore srv (tmpdir ++ "/shrink_try.bin") [vTry]
+                      let cmpFiles file1 file2 = do
+                            file1Contents <- SBS.readFile file1
+                            file2Contents <- SBS.readFile file2
+                            pure $ file1Contents == file2Contents
+
+                      filesEqual <- cmpFiles (tmpdir ++ "/shrink_input.bin") (tmpdir ++ "/shrink_try.bin")
+
+
+                      if filesEqual
+                        then do 
+                            freeVars srv [vIn]
+                              >> packType scratchBin srv vIn propTy [vTry]
+                              >> pure AcceptedInc
+                        else do
+                          -- overwrite vIn with vTry, keep tactic the same
+                            freeVars srv [vIn]
+                              >> packType scratchBin srv vIn propTy [vTry]
+                              >> pure AcceptedSame
                   _ -> pure StopShrinking
 
   let loop (tactic :: Int32) = do
@@ -1384,7 +1400,7 @@ validateShrinkTypes srv propName shrinkName = do
   let doneTy = last shrinkOuts
       yOuts = init shrinkOuts
 
-  unless (doneTy == "i8") $
+  unless (doneTy == "bool") $
     error $
       "Shrinker output mismatch.\n"
         <> "  shrinker "
