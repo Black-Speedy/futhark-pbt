@@ -26,12 +26,15 @@ run_test() {
         ArrayRecord* | "Arrayi32(2).fut")
             seed_flag="--seed=976321339"
             ;;
+        "reverse.fut")
+            seed_flag="--seed=885903244"
+            ;;
     esac
 
     test_file_full_path="$TEST_DIR/${test_file#./}"
 
     expected="${test_file%.fut}.out"
-    actual="${test_file%.fut}.outactual"
+    actual="${test_file%.fut}.out_actual"
 
     ($futhark_cmd test $seed_flag "$test_file_full_path") 2>&1 | \
         grep -vE "Compiling with|Running compiled|Running .*/|^$TEST_DIR/|[0-9]+ failed|[0-9]+ passed|[0-9]+/[0-9]+ passed" | \

@@ -252,12 +252,14 @@ runOne s config scratchBin srv entryNameRef = do
               checkIO $ sendGenInputs srv serverSize serverSeed genName size seed
 
               runUpdate genName
-              genOut <- liftIO $ generatorPhase genName serverSize serverSeed serverIn
+              genOutE <- liftIO $ generatorPhase genName serverSize serverSeed serverIn
+              genOut <- either throwE pure genOutE
 
               runUpdate propName
 
-              ok <- liftIO $ withCallKeepIns srv propName serverOk [serverIn] $ \_ ->
-                getVal srv serverOk
+              okE <- liftIO $ withCallKeepIns srv propName serverOk [serverIn] $
+                \vOk -> getVal srv vOk
+              ok <- either (throwE . ("Property " <>)) pure okE
 
               if ok
                 then loop (i + 1)
@@ -289,29 +291,33 @@ runOne s config scratchBin srv entryNameRef = do
   where
     generatorPhase genName serverSize serverSeed serverIn = do
       let genOut = outName genName
-      withFreedVars srv [genOut] $ do
-        _ <- callFreeIns srv genName genOut [serverSize, serverSeed]
-        copyVar scratchBin srv serverIn genOut
+      withFreedVars srv [genOut] $ runExceptT $ do
+        errM <- liftIO $ callFreeIns srv genName genOut [serverSize, serverSeed]
+        maybe (pure ()) (throwE . (("Generator failed: " <> genName <> " has ") <>)) errM
+        liftIO $ copyVar scratchBin srv serverIn genOut
         pure genOut
 
     pPrintPhase propName serverIn = do
       inputTypes <- getInputTypes srv propName
       case inputTypes of
         (ty0 : _) -> do
-          prettyOut <- case psPPrint s of
+          prettyOutE <- case psPPrint s of
             Just futPPrint -> do
               let prettyOuts = outName futPPrint
-              withFreedVars srv [prettyOuts] $ do
-                _ <- callFreeIns srv futPPrint prettyOuts [serverIn]
-                valE <- FSV.getValue srv prettyOuts
+              withFreedVars srv [prettyOuts] $ runExceptT $ do
+                errM <- liftIO $ callFreeIns srv futPPrint prettyOuts [serverIn]
+                maybe (pure ()) (throwE . (("Pretty printer failed: " <> futPPrint <> " has ") <>)) errM
+                valE <- liftIO $ FSV.getValue srv prettyOuts
                 case valE of
                   Left err -> fail $ "getValue failed: " <> show err -- this is server error, not user error, so we can just fail
                   Right (U8Value _ bytes) -> pure $ T.pack [chr (fromIntegral b) | b <- SV.toList bytes]
                   Right _ -> pure $ T.pack "pretty printer returned non-u8 value" -- this is user error
             Nothing ->
-              prettyVar srv serverIn ty0
-
-          pure $ "Minimal counterexample: " <> prettyOut
+              Right <$> prettyVar srv serverIn ty0
+          case prettyOutE of
+            -- TODO: report necessary info like the example resulting in the counterexample and other useful information like size and seed.
+            Left err -> pure err -- report as user a 'regular' error/users fault
+            Right prettyOut ->  pure $ "Minimal counterexample: " <> prettyOut
         _ -> pure "Could not retrieve input types for counterexample log."
 
 -- Bridges IO (Maybe Error) into our ExceptT block
@@ -357,30 +363,33 @@ autoShrinkLoop scratchBin srv propName genName vIn size seed genOut phaseRef = r
 
             -- Note: Since withFreedVars manages server-side resources,
             -- we lift the whole block into IO then handle the result.
-            res <- liftIO $ withFreedVars srv [genOut, vCand] $ do
-              autoShrinkUpdatePhase (Just genName)
-              _ <- callFreeIns srv genName genOut [serverSize, serverSeed]
+            res <- liftIO $ withFreedVars srv [genOut, vCand] $ runExceptT $ do
+              liftIO $ autoShrinkUpdatePhase (Just genName)
+              errM <- liftIO $ callFreeIns srv genName genOut [serverSize, serverSeed]
+              maybe (pure ()) (throwE . (("Generator failed: " <> genName <> " has ") <>)) errM
 
-              _ <-
+              _ <- liftIO $
                 freeOnException srv [vCand] $
                   copyVar scratchBin srv vCand genOut
 
-              autoShrinkUpdatePhase (Just propName)
-              ok <- withCallKeepIns srv propName vOk [vCand] $ \_ ->
-                getVal srv vOk
+              liftIO $ autoShrinkUpdatePhase (Just propName)
+              okE <- liftIO $ withCallKeepIns srv propName vOk [vCand] $
+                \vOk' -> getVal srv vOk'
+              ok <- either (throwE . ("Property " <>)) pure okE
 
-              autoShrinkUpdatePhase Nothing
+              liftIO $ autoShrinkUpdatePhase Nothing
 
               if ok
                 then pure Nothing -- Shrink didn't find a smaller failure
                 else do
-                  _ <-
+                  _ <- liftIO $
                     freeOnException srv [vIn] $
                       copyVar scratchBin srv vIn vCand
                   pure (Just newSize) -- Found a smaller failing size!
             case res of
-              Nothing -> loop (i - 1)
-              Just s -> loop s
+              Left err -> throwE err
+              Right Nothing -> loop (i - 1)
+              Right (Just s) -> loop s
   loop size
 
 data Step
@@ -406,7 +415,7 @@ shrinkLoop scratchBin srv propName vIn shrinkName seed numTries phaseRef = runEx
   seedTy <-
     liftIO (getInputTypes srv shrinkName) >>= \case
       [_, sTy] -> pure sTy
-      [] -> throwE $ "Shrinker " <> shrinkName <> " has no inputs?"
+      []  -> throwE $ "Shrinker " <> shrinkName <> " has no inputs?"
       [_] -> throwE $ "Shrinker " <> shrinkName <> " has 1 input; expected 2 (x, random value)."
       tys -> throwE $ "Shrinker " <> shrinkName <> " has " <> showText (length tys) <> " inputs; expected 2."
 
@@ -417,7 +426,8 @@ shrinkLoop scratchBin srv propName vIn shrinkName seed numTries phaseRef = runEx
   let loop (pseudoRandom :: Int32) (acc :: Int) (totalCounter :: Int)
         | acc >= numTries = pure Nothing
         | otherwise = do
-            stepResult <- liftIO $ oneStep size pseudoRandom
+            stepResultE <- liftIO $ oneStep size pseudoRandom
+            stepResult <- either (throwE . ("Error in shrinker: " <>)) pure stepResultE
 
             let branchGen = mkStdGen (fromIntegral pseudoRandom)
             let (pseudoRandom', _) = random branchGen
@@ -450,19 +460,23 @@ shrinkLoop scratchBin srv propName vIn shrinkName seed numTries phaseRef = runEx
       let shrinkOuts = outName shrinkName
       shrinkUpdatePhase Nothing
 
-      withFreedVars srv [shrinkOuts, vTry] $ do
-        _ <- callFreeIns srv shrinkName shrinkOuts [vInRetyped, vTactic]
-        _ <- freeOnException srv [vTry] $ copyVar scratchBin srv vTry shrinkOuts
+      withFreedVars srv [shrinkOuts, vTry] $ runExceptT $ do
+        errE <- liftIO $ callFreeIns srv shrinkName shrinkOuts [vInRetyped, vTactic]
+        maybe (pure ()) (throwE . ((shrinkName <> " has ") <>)) errE
+        _ <- liftIO $ freeOnException srv [vTry] $ copyVar scratchBin srv vTry shrinkOuts
 
-        shrinkUpdatePhase Nothing
-        ok <- withCallKeepIns srv propName vOk [vTry] $ \_ -> getVal srv vOk
-        shrinkUpdatePhase Nothing
+        liftIO $ shrinkUpdatePhase Nothing
+
+        okE <- liftIO $ withCallKeepIns srv propName vOk [vTry] $ \vOk' -> getVal srv vOk'
+        ok <- either (throwE . ("Property " <>)) pure okE
+
+        liftIO $ shrinkUpdatePhase Nothing
 
         case ok of
           True -> pure NotAcceptedShrink
           False -> do
-            freeVars srv [vIn]
-            _ <- copyVar scratchBin srv vIn vTry
+            liftIO $ freeVars srv [vIn]
+            _ <- liftIO $ copyVar scratchBin srv vIn vTry
             pure AcceptedShrink
 
 sendGenInputs :: Server -> VarName -> VarName -> VarName -> Int64 -> Int32 -> IO (Maybe PBTFailure)
@@ -501,27 +515,38 @@ freeVars s vs = do
       | otherwise ->
           fail $ "cmdFree failed for " <> show vs <> ": " <> show (failureMsg err)
 
-callFreeIns :: Server -> EntryName -> VarName -> [VarName] -> IO [VarName]
+callFreeIns :: Server -> EntryName -> VarName -> [VarName] -> IO (Maybe PBTFailure)
 callFreeIns s entry out ins = do
   freeVars s [out]
   r <- cmdCall s entry out ins
   freeVars s ins
-  either (\err -> fail $ T.unpack entry <> ": " <> show (failureMsg err)) pure r
+  either (pure . handleRuntimeError entry) (const $ pure Nothing) r
 
-callKeepIns :: Server -> EntryName -> VarName -> [VarName] -> IO [VarName]
+isRuntimeError :: CmdFailure -> Bool
+isRuntimeError failure = any ("runtime: " `T.isPrefixOf`) (failureLog failure)
+
+handleRuntimeError :: EntryName -> CmdFailure -> Maybe PBTFailure
+handleRuntimeError entry err
+  | isRuntimeError err = Just $ "Runtime error: " <> showText (failureMsg err)
+  | otherwise          = fail . T.unpack $ "Fatal Error on " <> entry
+                          <> ": " <> showText (failureMsg err)
+
+callKeepIns :: Server -> EntryName -> VarName -> [VarName] -> IO (Maybe PBTFailure)
 callKeepIns s entry out ins = do
   freeVars s [out]
   r <- cmdCall s entry out ins
-  either (\err -> fail $ T.unpack entry <> ": " <> show (failureMsg err)) pure r
+  either (pure . handleRuntimeError entry) (const $ pure Nothing) r
 
 freeOnException :: Server -> [VarName] -> IO a -> IO a
 freeOnException srv vs action =
   action `onException` freeVars srv vs
 
-withCallKeepIns :: Server -> EntryName -> VarName -> [VarName] -> (VarName -> IO a) -> IO a
+withCallKeepIns :: Server -> EntryName -> VarName -> [VarName] -> (VarName -> IO a) -> IO (Either PBTFailure a)
 withCallKeepIns srv entry out ins k = do
-  _ <- callKeepIns srv entry out ins
-  k out `finally` freeVars srv [out]
+  errM <- callKeepIns srv entry out ins
+  maybe (Right <$> (k out `finally` freeVars srv [out])) 
+        (pure . Left . ((entry <> " has ") <>))
+        errM
 
 withFreedVars :: Server -> [VarName] -> IO a -> IO a
 withFreedVars srv vs action =
