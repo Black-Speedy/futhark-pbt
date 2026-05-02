@@ -14,7 +14,6 @@ import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Trans.Class (lift)
 import Data.ByteString qualified as SBS
 import Data.ByteString.Lazy qualified as LBS
-import Data.Either (partitionEithers)
 import Data.IORef
 import Data.Int (Int32)
 import Data.List (delete, partition)
@@ -390,22 +389,25 @@ runTestCase (TestCase mode program testcase progs pbtConfig) = do
                 let requestedNames = [propName | PropertyCase propName <- properties]
                 let diagnostics = propertyDiagnostics requestedNames propSpecs
 
-                if null diagnostics
+                propResults <- if null diagnostics
                   then do
                     let verifiedProps = filter (\p -> psProp p `elem` requestedNames) propSpecs
-                    propResultsM <- runPBT pbtConfig server verifiedProps phaseRef
-                    let (failures, outputs) = partitionEithers propResultsM
-                    let propResults = map (\case
-                                            Just err -> Failure [err]
-                                            Nothing  -> Success) outputs
-                    -- if any properties failed, write them to a file for later inspection
-                    when (any (\r -> case r of
-                                      Failure _ -> True
-                                      Success   -> False) propResults) $
-                        liftIO $ propToFile program propResults
-                    pure $ normal_test_result ++ propResults ++ diagnostics ++ [Failure failures]
-                  else
-                    pure $ normal_test_result ++ diagnostics
+                    propResultsE <- runPBT pbtConfig server verifiedProps phaseRef
+                    
+                    let allResults = flip map propResultsE $ \case
+                          Left err       -> Failure [err]
+                          Right (Just e) -> Failure [e]
+                          Right Nothing  -> Success
+
+                    let hasFailures = any (\case Failure _ -> True; _ -> False) allResults
+
+                    when hasFailures $ 
+                      liftIO $ propToFile program allResults
+
+                    pure allResults
+                  else pure []
+
+                pure $ normal_test_result ++ diagnostics ++ propResults
 
       when (mode == Interpreted) $
         context "Interpreting" $
